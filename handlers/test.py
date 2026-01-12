@@ -53,6 +53,15 @@ async def prepare_test(message: Message, state: FSMContext):
             return
 
         data = await state.get_data()
+
+        # Преобразуем mode из строки в enum если необходимо
+        mode_value = data.get("mode")
+        if mode_value and isinstance(mode_value, str):
+            try:
+                mode_value = CampaignType(mode_value)
+            except ValueError:
+                mode_value = None
+
         session = Session(
             fio=data.get("fio"),
             question_ids=[q.row_index for q in selected_questions],
@@ -64,7 +73,7 @@ async def prepare_test(message: Message, state: FSMContext):
             per_question_deadline=None,
             admin_config_snapshot=admin_config.__dict__,
             campaign_name=data.get("campaign_name"),
-            mode=data.get("mode")
+            mode=mode_value
         )
 
         await state.update_data(
