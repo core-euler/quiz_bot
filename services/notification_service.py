@@ -103,6 +103,11 @@ class NotificationService:
                 if status_str != UserStatus.CONFIRMED.value:
                     continue
 
+                # Only notify users who have passed the initial test
+                if not self.google_sheets.has_passed_initial_test(telegram_id):
+                    logger.debug(f"User {telegram_id} skipped for campaign '{campaign.name}' - initial test not passed.")
+                    continue
+
                 # Check assignment
                 user_motorcade = row[motorcade_col] if motorcade_col < len(row) else ""
 

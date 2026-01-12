@@ -104,7 +104,22 @@ class SchedulerService:
                     announced_campaign_names.append(campaign.name)
                     continue
 
+                # Фильтруем только пользователей, сдавших основной тест
+                eligible_users = []
                 for user in target_users:
+                    if self.google_sheets.has_passed_initial_test(user.telegram_id):
+                        eligible_users.append(user)
+                    else:
+                        logger.debug(f"User {user.telegram_id} ({user.fio}) skipped for campaign '{campaign.name}' - initial test not passed.")
+
+                if not eligible_users:
+                    logger.info(f"No eligible users (passed initial test) for campaign '{campaign.name}'. Skipping.")
+                    announced_campaign_names.append(campaign.name)
+                    continue
+
+                logger.info(f"Found {len(eligible_users)} eligible users for campaign '{campaign.name}' (out of {len(target_users)} target users).")
+
+                for user in eligible_users:
                     try:
                         message = self.notification_service.build_new_campaign_message(campaign, user.fio)
                         await self.bot.send_message(

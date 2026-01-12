@@ -30,9 +30,16 @@ async def cmd_appeal(message: Message, state: FSMContext):
         return
 
     await state.set_state(Appeal.waiting_for_message)
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отменить", callback_data="appeal_cancel_input")]
+        ]
+    )
+
     await message.answer(
-        "📨 Напишите ваше обращение к администратору.\n\n"
-        "Вы можете отменить отправку командой /cancel."
+        "📨 Напишите ваше обращение к администратору:",
+        reply_markup=keyboard
     )
     logger.info(f"User {message.from_user.id} started appeal flow")
 
@@ -77,24 +84,38 @@ async def process_appeal_message(message: Message, state: FSMContext):
 
 
 @router.callback_query(Appeal.confirm_send, F.data == "appeal_confirm")
-async def confirm_appeal(callback: CallbackQuery, state: FSMContext, bot: Bot):
+async def confirm_appeal(callback: CallbackQuery, state: FSMContext, bot: Bot, google_sheets):
     """Send appeal to owner.
 
     Args:
         callback: Callback from confirmation button
         state: FSM context
         bot: Bot instance
+        google_sheets: Google Sheets service
     """
     data = await state.get_data()
     appeal_text = data.get("appeal_text")
     user = callback.from_user
+    user_id = str(user.id)
+
+    # Получаем данные пользователя из Google Sheets
+    try:
+        from services.google_sheets import GoogleSheetsService
+        user_info = google_sheets.get_user_info(user_id)
+        fio = user_info.fio if user_info and user_info.fio else f"{user.first_name} {user.last_name or ''}".strip()
+        phone = user_info.phone if user_info and user_info.phone else "не указан"
+    except Exception as e:
+        logger.warning(f"Failed to get user info from sheets for appeal: {e}")
+        fio = f"{user.first_name} {user.last_name or ''}".strip()
+        phone = "не указан"
 
     owner_id = Config.OWNER_TELEGRAM_ID
     message_text = (
         f"📨 Обращение от пользователя\n\n"
         f"👤 Пользователь: @{user.username or 'нет username'}\n"
         f"🆔 Telegram ID: {user.id}\n"
-        f"👨‍💼 Имя: {user.first_name} {user.last_name or ''}\n"
+        f"👨‍💼 ФИО: {fio}\n"
+        f"📱 Телефон: {phone}\n"
         f"📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
         f"💬 Сообщение:\n{appeal_text}"
     )
@@ -113,6 +134,20 @@ async def confirm_appeal(callback: CallbackQuery, state: FSMContext, bot: Bot):
 
     await state.clear()
     await callback.answer()
+
+
+@router.callback_query(F.data == "appeal_cancel_input")
+async def cancel_appeal_input(callback: CallbackQuery, state: FSMContext):
+    """Cancel appeal during input stage.
+
+    Args:
+        callback: Callback from cancel button
+        state: FSM context
+    """
+    await callback.message.edit_text("❌ Обращение отменено.")
+    await state.clear()
+    await callback.answer()
+    logger.info(f"User {callback.from_user.id} cancelled appeal during input")
 
 
 @router.callback_query(Appeal.confirm_send, F.data == "appeal_cancel")

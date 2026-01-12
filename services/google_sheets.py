@@ -279,6 +279,66 @@ class GoogleSheetsService:
         logger.info(f"Для пользователя {telegram_id} не найдено активных кампаний.")
         return None
 
+    def has_passed_initial_test(self, user_id: str, user_results: Optional[List[UserResult]] = None) -> bool:
+        """Проверяет, сдал ли пользователь успешно основной тест."""
+        if user_results is None:
+            user_results = self.get_user_results(user_id)
+        
+        return any(
+            not r.campaign_name and r.final_status == "успешно"
+            for r in user_results
+        )
+
+    def get_all_active_campaigns_for_user(self, user_id: str) -> List[Campaign]:
+        """Возвращает список всех активных и доступных кампаний для пользователя."""
+        user_info = self.get_user_info(user_id)
+        if not user_info:
+            logger.warning(f"Для telegram_id {user_id} не найдена информация о пользователе.")
+            return []
+
+        all_campaigns = self.get_all_campaigns()
+        user_results = self.get_user_results(user_id)
+        
+        user_results.sort(key=lambda r: r.date, reverse=True)
+        latest_results = {res.campaign_name: res.final_status for res in reversed(user_results)}
+
+        today = datetime.now()
+        available_campaigns = []
+
+        for campaign in all_campaigns:
+            if campaign.deadline.date() < today.date():
+                continue
+
+            if campaign.assignment.upper() != "ВСЕ":
+                if user_info.motorcade != campaign.assignment:
+                    continue
+
+            last_status = latest_results.get(campaign.name)
+            
+            if last_status is None or last_status == "разрешена пересдача":
+                available_campaigns.append(campaign)
+        
+        logger.info(f"Для пользователя {user_id} найдено {len(available_campaigns)} активных кампаний.")
+        return available_campaigns
+
+    def get_campaign_by_name(self, campaign_name: str) -> Optional[Campaign]:
+        """Получает кампанию по имени.
+
+        Args:
+            campaign_name: Название кампании
+
+        Returns:
+            Campaign объект или None если не найдена
+        """
+        all_campaigns = self.get_all_campaigns()
+        for campaign in all_campaigns:
+            if campaign.name == campaign_name:
+                logger.info(f"Найдена кампания '{campaign_name}'.")
+                return campaign
+
+        logger.warning(f"Кампания '{campaign_name}' не найдена.")
+        return None
+
     def get_target_users_for_campaign(self, campaign: Campaign) -> List[UserInfo]:
         """Возвращает список подтвержденных пользователей, которым назначена кампания."""
         target_users = []
