@@ -58,59 +58,39 @@ async def cmd_start(message: Message, state: FSMContext, google_sheets: GoogleSh
             await message.answer(f"Ваша учетная запись находится в статусе '{user_status}'. Пожалуйста, дождитесь подтверждения администратором.")
             return
 
-        # Сценарий 3: Подтвержденный пользователь -> ищем кампанию или основной тест
+        # Сценарий 3: Подтвержденный пользователь -> сначала основной тест, потом кампании
         if user_status == "подтверждён":
-            campaign = google_sheets.get_active_campaign_for_user(user_id)
-            # 3.1 Если есть активная кампания
-            if campaign:
-                user_data = {
-                    "id": message.from_user.id, "username": message.from_user.username,
-                    "first_name": message.from_user.first_name, "last_name": message.from_user.last_name,
-                }
-                await state.update_data(user_data=user_data, campaign_name=campaign.name, mode=campaign.type.value)
+            user_results = google_sheets.get_user_results(user_id)
+            has_passed_init_test = any(
+                not r.campaign_name and r.final_status == "успешно"
+                for r in user_results
+            )
 
-                deadline_str = campaign.deadline.strftime("%d.%m.%Y")
-                message_text = (
-                    f"👋 Добро пожаловать!\n\n"
-                    f"Для вас доступна учебная кампания: **{campaign.name}**\n\n"
-                    f"🔹 **Тип:** {campaign.type.value}\n"
-                    f"🔹 **Срок прохождения:** до {deadline_str}\n\n"
-                    f"Нажмите «Начать», чтобы приступить."
-                )
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="Начать", callback_data="start_campaign")]
-                ])
-                await message.answer(message_text, reply_markup=keyboard, parse_mode="Markdown")
-                logger.info(f"Пользователю {user_id} предложена кампания '{campaign.name}'")
-            # 3.2 Если кампаний нет, проверяем, проходил ли пользователь основной тест
-            else:
-                user_results = google_sheets.get_user_results(user_id)
-                # Ищем хотя бы один результат без названия кампании
+            # 3.1. Если основной тест НЕ пройден, предлагаем его
+            if not has_passed_init_test:
                 has_taken_init_test = any(not r.campaign_name for r in user_results)
 
                 if not has_taken_init_test:
                     # Пользователь еще не проходил основной тест - разрешаем
                     message_text = (
                         "👋 Добро пожаловать!\n\n"
-                        "Для вас доступен обязательный основной тест. "
+                        "Для начала работы вам необходимо пройти основной тест. "
                         "Нажмите «Начать», чтобы приступить."
                     )
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(text="Начать основной тест", callback_data="start_init_test")]
                     ])
                     await message.answer(message_text, reply_markup=keyboard)
-                    logger.info(f"Пользователю {user_id} предложен основной тест.")
+                    logger.info(f"Пользователю {user_id} предложен основной тест (первый раз).")
                 else:
-                    # Пользователь уже проходил - проверяем cooldown
+                    # Пользователь уже проходил, но не сдал - проверяем cooldown
                     admin_config = google_sheets.read_admin_config()
                     last_test_time = google_sheets.get_last_test_time(int(user_id), campaign_name=None)
-
                     logger.info(f"Cooldown check for user {user_id}: last_test_time={last_test_time}, retry_hours={admin_config.retry_hours}")
 
                     if last_test_time:
                         hours_passed = (time.time() - last_test_time) / 3600
                         hours_required = admin_config.retry_hours
-
                         logger.info(f"Hours passed: {hours_passed:.2f}, required: {hours_required}")
 
                         if hours_passed < hours_required:
@@ -123,17 +103,16 @@ async def cmd_start(message: Message, state: FSMContext, google_sheets: GoogleSh
                                 time_msg = f"{minutes_remaining} мин."
 
                             await message.answer(
-                                f"⏳ Вы уже проходили основной тест.\n\n"
+                                f"⏳ Вы не сдали основной тест.\n\n"
                                 f"Повторная попытка будет доступна через {time_msg}\n\n"
                                 f"Правило: можно проходить тест раз в {hours_required} ч."
                             )
-                            logger.info(f"Пользователь {user_id} заблокирован cooldown (осталось {hours_remaining:.1f} ч.)")
+                            logger.info(f"Пользователь {user_id} заблокирован cooldown для основного теста (осталось {hours_remaining:.1f} ч.)")
                             return
 
                     # Cooldown прошел или не найден - разрешаем retry
                     message_text = (
-                        "👋 Добро пожаловать!\n\n"
-                        "Вы можете пройти основной тест повторно. "
+                        "👋 Вы можете пройти основной тест повторно. "
                         "Нажмите «Начать», чтобы приступить."
                     )
                     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -141,6 +120,36 @@ async def cmd_start(message: Message, state: FSMContext, google_sheets: GoogleSh
                     ])
                     await message.answer(message_text, reply_markup=keyboard)
                     logger.info(f"Пользователю {user_id} разрешена повторная попытка основного теста.")
+                return # Важно завершить обработку здесь
+
+            # 3.2. Если основной тест пройден, ищем кампании
+            else:
+                campaign = google_sheets.get_active_campaign_for_user(user_id)
+                if campaign:
+                    user_data = {
+                        "id": message.from_user.id, "username": message.from_user.username,
+                        "first_name": message.from_user.first_name, "last_name": message.from_user.last_name,
+                    }
+                    await state.update_data(user_data=user_data, campaign_name=campaign.name, mode=campaign.type.value)
+
+                    deadline_str = campaign.deadline.strftime("%d.%m.%Y")
+                    message_text = (
+                        f"👋 Здравствуйте!\n\n"
+                        f"Для вас доступна учебная кампания: **{campaign.name}**\n\n"
+                        f"🔹 **Тип:** {campaign.type.value}\n"
+                        f"🔹 **Срок прохождения:** до {deadline_str}\n\n"
+                        f"Нажмите «Начать», чтобы приступить."
+                    )
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="Начать", callback_data="start_campaign")]
+                    ])
+                    await message.answer(message_text, reply_markup=keyboard, parse_mode="Markdown")
+                    logger.info(f"Пользователю {user_id} предложена кампания '{campaign.name}'")
+                else:
+                    # Основной тест пройден, кампаний нет
+                    await message.answer("✅ Основной тест пройден. На данный момент для вас нет доступных кампаний.")
+                    logger.info(f"Пользователь {user_id} прошел основной тест, нет доступных кампаний.")
+
 
     except AdminConfigError as e:
         logger.error(f"Критическая ошибка конфигурации: {e}")

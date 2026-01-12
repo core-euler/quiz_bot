@@ -172,3 +172,22 @@ class NotificationService:
             )
         else:
             return ""
+
+    def build_new_campaign_message(self, campaign: Campaign, user_fio: str) -> str:
+        """Builds a message to announce a new campaign.
+
+        Args:
+            campaign: The new campaign.
+            user_fio: The full name (FIO) of the user.
+
+        Returns:
+            Formatted message string.
+        """
+        deadline_str = campaign.deadline.strftime("%d.%m.%Y")
+        return (
+            f"✨ Здравствуйте, {user_fio}!\n\n"
+            f"Для вас доступна новая учебная кампания: **{campaign.name}**\n\n"
+            f"Тип: {campaign.type.value}\n"
+            f"Срок прохождения: до {deadline_str}\n\n"
+            f"Чтобы начать, используйте команду /start"
+        )

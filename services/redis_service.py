@@ -85,3 +85,29 @@ class RedisService:
             logger.error(f"Ошибка проверки активной сессии: {e}")
             return False
 
+    def _get_processed_campaigns_key(self) -> str:
+        return "processed_campaigns"
+
+    async def get_processed_campaigns(self) -> set[str]:
+        """Возвращает множество названий обработанных кампаний."""
+        if not self.redis_client:
+            return set()
+        
+        try:
+            key = self._get_processed_campaigns_key()
+            campaigns_bytes = await self.redis_client.smembers(key)
+            return {c.decode('utf-8') for c in campaigns_bytes}
+        except Exception as e:
+            logger.error(f"Ошибка получения обработанных кампаний из Redis: {e}")
+            return set()
+
+    async def add_processed_campaigns(self, *campaign_names: str):
+        """Добавляет названия кампаний в множество обработанных."""
+        if not self.redis_client or not campaign_names:
+            return
+        
+        try:
+            key = self._get_processed_campaigns_key()
+            await self.redis_client.sadd(key, *campaign_names)
+        except Exception as e:
+            logger.error(f"Ошибка добавления обработанных кампаний в Redis: {e}")

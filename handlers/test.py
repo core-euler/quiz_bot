@@ -238,13 +238,13 @@ async def finish_test(message: Message, state: FSMContext, passed: bool, notes: 
         await state.clear()
         return
 
-    result_text = "Пройден" if passed else "Не пройден"
+    # Если тест не пройден из-за таймаута, notes будет содержать причину
     final_status = "успешно" if passed else "не пройдено"
-    campaign_name = session.campaign_name or ""  # Используем пустую строку, если имя кампании None
+    campaign_name = session.campaign_name or ""
 
     try:
         tz = pytz.timezone("Europe/Moscow")
-        test_date = datetime.now(tz).isoformat()
+        test_date = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
         display_name = user_data.get("username") or f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip()
 
         sheets_service.write_result(
@@ -252,19 +252,23 @@ async def finish_test(message: Message, state: FSMContext, passed: bool, notes: 
             display_name=display_name,
             test_date=test_date,
             fio=session.fio,
-            result=result_text,
             correct_count=session.correct_count,
             notes=notes,
             campaign_name=campaign_name,
             final_status=final_status,
         )
     except Exception as e:
-        logger.error(f"Ошибка записи результата в Google Sheets: {e}", exc_info=True)
-        await message.answer("⚠️ Не удалось сохранить результат. Обратитесь к администратору.")
+        logger.error(f"Ошибка записи результатов для пользователя {user_data.get('id')}: {e}")
+        # Попытка уведомить пользователя о сбое сохранения
+        await message.answer("⚠️ Произошла ошибка при сохранении вашего результата. Пожалуйста, сообщите администратору.")
+    finally:
+        await state.clear()
+        await redis_service.delete_session(user_data["id"])
+        logger.info(f"Сессия для пользователя {user_data.get('id')} завершена и очищена.")
 
     total_questions = len(data.get("questions", []))
     logger.info(
-        f"Тест завершен для {user_data['id']}: FIO={session.fio}, result={result_text}, "
+        f"Тест завершен для {user_data['id']}: FIO={session.fio}, status={final_status}, "
         f"correct={session.correct_count}/{total_questions}"
     )
 

@@ -16,6 +16,9 @@ class Config:
     OWNER_TELEGRAM_ID = os.getenv("OWNER_TELEGRAM_ID")
     ADMIN_TELEGRAM_ID = os.getenv("ADMIN_TELEGRAM_ID")
 
+    # Scheduler settings
+    CAMPAIGN_CHECK_INTERVAL_MINUTES = int(os.getenv("CAMPAIGN_CHECK_INTERVAL_MINUTES", "1"))
+
     # Google Sheets credentials
     _credentials_value = os.getenv("GOOGLE_CREDENTIALS")
     if _credentials_value:

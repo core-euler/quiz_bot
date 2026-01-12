@@ -72,7 +72,7 @@ async def main():
     dp["redis_service"] = redis_service # redis_service уже глобально, но для единообразия
 
     # Инициализация и запуск scheduler
-    scheduler_service = SchedulerService(bot, google_sheets_service)
+    scheduler_service = SchedulerService(bot, google_sheets_service, redis_service)
     scheduler_service.start()
     logger.info("Scheduler started")
 

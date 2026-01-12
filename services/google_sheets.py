@@ -174,10 +174,34 @@ class GoogleSheetsService:
             logger.error(f"Ошибка чтения кампаний из листа '{CAMPAIGNS_SHEET}': {e}")
             return []
 
+    def _parse_datetime_str(self, date_str: str) -> Optional[datetime]:
+        """Парсит строку с датой, поддерживая новый и старый (ISO) форматы."""
+        if not date_str:
+            return None
+        # ВАЖНО: все временные метки считаются в 'Europe/Moscow'
+        tz = pytz.timezone("Europe/Moscow")
+        try:
+            # Сначала пробуем новый формат "ГГГГ-ММ-ДД ЧЧ:ММ"
+            naive_dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M")
+            # Локализуем как московское время
+            return tz.localize(naive_dt)
+        except ValueError:
+            try:
+                # Фоллбэк на ISO формат для старых данных
+                dt = datetime.fromisoformat(date_str)
+                # Если в строке уже есть таймзона, fromisoformat вернет aware datetime.
+                # Если нет - вернет naive, который нужно локализовать.
+                if dt.tzinfo is None:
+                    return tz.localize(dt)
+                return dt
+            except ValueError:
+                logger.warning(f"Не удалось распознать формат даты '{date_str}' ни в одном из известных форматов.")
+                return None
+
     def get_user_results(self, telegram_id: str) -> List[UserResult]:
         results = []
         try:
-            range_name = f"{RESULTS_SHEET}!A:I"  # Захватываем все нужные колонки (A-I, 9 столбцов)
+            range_name = f"{RESULTS_SHEET}!A:I"
             result = self._retry_request(self.service.spreadsheets().values().get, spreadsheetId=self.sheet_id,
                                           range=range_name)
             values = result.get('values', [])
@@ -199,8 +223,11 @@ class GoogleSheetsService:
                 if len(row) > id_col and str(row[id_col]) == telegram_id:
                     try:
                         date_str = row[date_col]
-                        dt = datetime.fromisoformat(date_str)
-                        # Безопасный доступ к campaign_name и status с fallback
+                        dt = self._parse_datetime_str(date_str)
+                        if not dt:
+                            logger.warning(f"Пропуск результата для {telegram_id} из-за неверной даты: '{date_str}'")
+                            continue
+
                         campaign_name = row[campaign_col] if len(row) > campaign_col else ""
                         final_status = row[status_col] if len(row) > status_col else ""
                         results.append(UserResult(
@@ -226,46 +253,94 @@ class GoogleSheetsService:
         all_campaigns = self.get_all_campaigns()
         user_results = self.get_user_results(telegram_id)
         
-        # Создаем словарь для последнего результата по каждой кампании
-        # Сортируем результаты по дате, чтобы гарантировать, что мы берем последний
         user_results.sort(key=lambda r: r.date, reverse=True)
         latest_results = {res.campaign_name: res.final_status for res in reversed(user_results)}
 
         today = datetime.now()
 
         for campaign in all_campaigns:
-            # 1. Проверка дедлайна
             if campaign.deadline.date() < today.date():
                 continue
 
-            # 2. Проверка назначения
-            # Если "ВСЕ" - доступно всем, иначе сравниваем с автоколонной пользователя
             if campaign.assignment.upper() != "ВСЕ":
                 if user_info.motorcade != campaign.assignment:
                     continue
 
-            # 3. Проверка статуса прохождения
             last_status = latest_results.get(campaign.name)
 
-            # Если статуса нет - кампания доступна
             if last_status is None:
                 logger.info(f"Найдена активная кампания '{campaign.name}' для пользователя {telegram_id} (ранее не проходил).")
                 return campaign
 
-            # Если статус 'разрешена пересдача' - кампания доступна
             if last_status == "разрешена пересдача":
                 logger.info(f"Найдена активная кампания '{campaign.name}' для пользователя {telegram_id} (разрешена пересдача).")
                 return campaign
 
-            # В остальных случаях (пройден, не пройден и т.д.) - кампания недоступна
-            # (Логика "не пройден" может быть изменена, но пока считаем любую попытку, кроме пересдачи, завершенной)
-
         logger.info(f"Для пользователя {telegram_id} не найдено активных кампаний.")
         return None
 
+    def get_target_users_for_campaign(self, campaign: Campaign) -> List[UserInfo]:
+        """Возвращает список подтвержденных пользователей, которым назначена кампания."""
+        target_users = []
+        try:
+            range_name = f"{USERS_SHEET}!A:E"
+            result = self._retry_request(
+                self.service.spreadsheets().values().get,
+                spreadsheetId=self.sheet_id,
+                range=range_name
+            )
+            values = result.get('values', [])
+            if len(values) < 2:
+                return []
+
+            headers = [h.lower().strip() for h in values[0]]
+            try:
+                id_col = headers.index('telegram_id')
+                phone_col = headers.index('телефон')
+                fio_col = headers.index('фио')
+                motorcade_col = headers.index('автоколонна')
+                status_col = headers.index('статус')
+            except ValueError as e:
+                logger.error(f"В листе '{USERS_SHEET}' отсутствует обязательная колонка: {e}")
+                return []
+
+            for row in values[1:]:
+                if not row or not row[id_col]:
+                    continue
+
+                try:
+                    status_str = row[status_col].strip() if status_col < len(row) else ""
+                    if UserStatus(status_str) != UserStatus.CONFIRMED:
+                        continue
+
+                    user_motorcade = row[motorcade_col] if motorcade_col < len(row) else ""
+                    is_target = False
+                    if campaign.assignment.upper() == "ВСЕ":
+                        is_target = True
+                    elif user_motorcade == campaign.assignment:
+                        is_target = True
+
+                    if is_target:
+                        target_users.append(UserInfo(
+                            telegram_id=str(row[id_col]),
+                            phone=row[phone_col] if phone_col < len(row) else "",
+                            fio=row[fio_col] if fio_col < len(row) else "",
+                            motorcade=user_motorcade,
+                            status=UserStatus.CONFIRMED
+                        ))
+                except (ValueError, IndexError) as e:
+                    logger.warning(f"Ошибка парсинга пользователя в строке {row}: {e}")
+                    continue
+            
+            logger.info(f"Для кампании '{campaign.name}' найдено {len(target_users)} целевых пользователей.")
+            return target_users
+        except Exception as e:
+            logger.error(f"Ошибка получения целевых пользователей для кампании '{campaign.name}': {e}")
+            return []
+
     def read_admin_config(self) -> AdminConfig:
         try:
-            range_name = f"{ADMIN_SHEET}!A1:E2"  # Расширяем диапазон до E
+            range_name = f"{ADMIN_SHEET}!A1:E2"
             result = self._retry_request(
                 self.service.spreadsheets().values().get,
                 spreadsheetId=self.sheet_id,
@@ -302,7 +377,6 @@ class GoogleSheetsService:
             if missing_fields:
                 raise AdminConfigError("Не заполнены обязательные поля: " + ", ".join(missing_fields))
 
-            # Чтение и парсинг автоколонн
             motorcades_raw = config_dict.get('автоколонны')
             if motorcades_raw and isinstance(motorcades_raw, str):
                 motorcades_list = [mc.strip() for mc in motorcades_raw.split(';') if mc.strip()]
@@ -318,7 +392,7 @@ class GoogleSheetsService:
 
     def read_questions(self) -> List[Question]:
         try:
-            range_name = f"{QUESTIONS_SHEET}!A:J"  # Расширяем диапазон
+            range_name = f"{QUESTIONS_SHEET}!A:J"
             result = self._retry_request(
                 self.service.spreadsheets().values().get,
                 spreadsheetId=self.sheet_id,
@@ -330,7 +404,6 @@ class GoogleSheetsService:
             headers = [h.lower().strip() for h in values[0]]
             questions = []
 
-            # Динамически находим индексы
             try:
                 h = {
                     'cat': headers.index('категория'), 'q': headers.index('вопрос'),
@@ -347,7 +420,6 @@ class GoogleSheetsService:
 
             for row_idx, row in enumerate(values[1:], start=2):
                 try:
-                    # Используем get для безопасного доступа
                     get = lambda index: row[index].strip() if index < len(row) and row[index] else ""
 
                     question_text = get(h['q'])
@@ -381,17 +453,7 @@ class GoogleSheetsService:
             return []
 
     def get_last_test_time(self, telegram_id: int, campaign_name: Optional[str] = None) -> Optional[float]:
-        """Get timestamp of last test attempt for user.
-
-        Args:
-            telegram_id: User's telegram ID
-            campaign_name: Optional campaign name to filter by.
-                          If None, returns last test for initial test (no campaign).
-                          If empty string "", also matches initial tests.
-
-        Returns:
-            Timestamp of last test, or None if not found
-        """
+        """Get timestamp of last test attempt for user."""
         try:
             range_name = f"{RESULTS_SHEET}!A:I"
             result = self._retry_request(
@@ -410,29 +472,23 @@ class GoogleSheetsService:
                 if str(row[0]) != telegram_id_str:
                     continue
 
-                # Check campaign filter
                 row_campaign = row[8] if len(row) > 8 else ""
                 logger.info(f"Found row for user {telegram_id_str}: row_campaign='{row_campaign}', date={row[2] if len(row) > 2 else 'N/A'}")
 
-                # If filtering for initial test (campaign_name is None or "")
                 if campaign_name is None or campaign_name == "":
-                    if row_campaign:  # Skip if row has a campaign
+                    if row_campaign:
                         logger.info(f"Skipping row - has campaign '{row_campaign}' but looking for initial test")
                         continue
-                # If filtering for specific campaign
                 elif row_campaign != campaign_name:
                     logger.info(f"Skipping row - campaign mismatch: '{row_campaign}' != '{campaign_name}'")
                     continue
 
-                # Found matching row, get date
                 if len(row) > 2 and row[2]:
-                    try:
-                        timestamp = datetime.fromisoformat(row[2]).timestamp()
+                    dt = self._parse_datetime_str(row[2])
+                    if dt:
+                        timestamp = dt.timestamp()
                         logger.info(f"Found matching test: date={row[2]}, timestamp={timestamp}")
                         return timestamp
-                    except ValueError:
-                        logger.warning(f"Не удалось распознать формат даты '{row[2]}'")
-                        continue
 
             logger.info(f"No matching test found for user {telegram_id_str}")
             return None
@@ -440,19 +496,20 @@ class GoogleSheetsService:
             logger.error(f"Ошибка получения времени последнего теста: {e}")
             return None
 
-    def write_result(self, telegram_id: int, display_name: str, test_date: str, fio: str, result: str,
+    def write_result(self, telegram_id: int, display_name: str, test_date: str, fio: str,
                      correct_count: int, campaign_name: str, final_status: str, notes: Optional[str] = None):
         """Записывает результат теста в лист Результаты."""
         try:
+            # Новый порядок: без 'Результат'
             values = [[
-                str(telegram_id), display_name or '', test_date, fio, result,
+                str(telegram_id), display_name or '', test_date, fio,
                 str(correct_count), notes or '', final_status, campaign_name
             ]]
             logger.info(f"Writing result: telegram_id={telegram_id}, campaign_name='{campaign_name}', final_status='{final_status}', date={test_date}")
             body = {'values': values}
 
-            # Находим правильный диапазон, включая новые колонки
-            range_to_append = f"{RESULTS_SHEET}!A:I" # A-I, 9 колонок
+            # Диапазон теперь A:H, но append работает и без указания последней колонки
+            range_to_append = f"{RESULTS_SHEET}!A:H"
 
             append_result = self._retry_request(
                 self.service.spreadsheets().values().append,
@@ -472,7 +529,7 @@ class GoogleSheetsService:
                                 'range': {
                                     'sheetId': sheet_id,
                                     'startRowIndex': row_number - 1, 'endRowIndex': row_number,
-                                    'startColumnIndex': 0, 'endColumnIndex': 9
+                                    'startColumnIndex': 0, 'endColumnIndex': 8 # 8 колонок
                                 },
                                 'cell': {'userEnteredFormat': {}},
                                 'fields': 'userEnteredFormat'
