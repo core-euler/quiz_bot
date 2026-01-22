@@ -14,7 +14,16 @@ class Config:
 
     # New IDs for owner and admin
     OWNER_TELEGRAM_ID = os.getenv("OWNER_TELEGRAM_ID")
-    ADMIN_TELEGRAM_ID = os.getenv("ADMIN_TELEGRAM_ID")
+
+    # ADMIN_TELEGRAM_ID can be a single ID or comma-separated list
+    _admin_ids_str = os.getenv("ADMIN_TELEGRAM_ID", "")
+    ADMIN_TELEGRAM_IDS = []
+    if _admin_ids_str:
+        # Split by comma and strip whitespace
+        ADMIN_TELEGRAM_IDS = [aid.strip() for aid in _admin_ids_str.split(",") if aid.strip()]
+
+    # Keep ADMIN_TELEGRAM_ID for backward compatibility (first admin in list)
+    ADMIN_TELEGRAM_ID = ADMIN_TELEGRAM_IDS[0] if ADMIN_TELEGRAM_IDS else None
 
     # Scheduler settings
     CAMPAIGN_CHECK_INTERVAL_MINUTES = int(os.getenv("CAMPAIGN_CHECK_INTERVAL_MINUTES", "1"))

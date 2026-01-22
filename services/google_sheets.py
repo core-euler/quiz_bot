@@ -78,6 +78,27 @@ class GoogleSheetsService:
             logger.error(f"Ошибка добавления пользователя в лист '{USERS_SHEET}': {e}")
             raise
 
+    @staticmethod
+    def _normalize_status(status_str: str) -> str:
+        """Нормализует статус пользователя.
+
+        Заменяет 'е' на 'ё' в словах 'подтвержден' и 'отклонен' для совместимости.
+
+        Args:
+            status_str: Исходный статус из Google Sheets
+
+        Returns:
+            Нормализованный статус
+        """
+        normalized = status_str.strip()
+        # Заменяем "подтвержден" -> "подтверждён"
+        if normalized == "подтвержден":
+            normalized = "подтверждён"
+        # Заменяем "отклонен" -> "отклонён"
+        elif normalized == "отклонен":
+            normalized = "отклонён"
+        return normalized
+
     def get_user_info(self, telegram_id: str) -> Optional[UserInfo]:
         try:
             range_name = f"{USERS_SHEET}!A:E"
@@ -104,8 +125,8 @@ class GoogleSheetsService:
             for row in values[1:]:
                 if len(row) > id_col and str(row[id_col]) == telegram_id:
                     try:
-                        # Убираем пробелы из статуса перед парсингом
-                        status_str = row[status_col].strip()
+                        # Нормализуем статус (подтвержден -> подтверждён)
+                        status_str = self._normalize_status(row[status_col])
                         status = UserStatus(status_str)
                         
                         return UserInfo(
@@ -201,7 +222,7 @@ class GoogleSheetsService:
     def get_user_results(self, telegram_id: str) -> List[UserResult]:
         results = []
         try:
-            range_name = f"{RESULTS_SHEET}!A:I"
+            range_name = f"{RESULTS_SHEET}!A:H"  # 8 columns
             result = self._retry_request(self.service.spreadsheets().values().get, spreadsheetId=self.sheet_id,
                                           range=range_name)
             values = result.get('values', [])
@@ -212,8 +233,11 @@ class GoogleSheetsService:
             try:
                 id_col = headers.index('telegram_id')
                 date_col = headers.index('дата прохождения теста')
-                campaign_col = headers.index('название кампании')
+                fio_col = headers.index('фио')
+                correct_col = headers.index('количество верных ответов')
+                notes_col = headers.index('примечания')
                 status_col = headers.index('итоговый статус')
+                campaign_col = headers.index('название кампании')
             except ValueError as e:
                 logger.error(f"В листе '{RESULTS_SHEET}' отсутствует обязательная колонка: {e}")
                 logger.error(f"Доступные заголовки: {headers}")
@@ -230,11 +254,26 @@ class GoogleSheetsService:
 
                         campaign_name = row[campaign_col] if len(row) > campaign_col else ""
                         final_status = row[status_col] if len(row) > status_col else ""
+
+                        # Вычисляем result из final_status для обратной совместимости
+                        result = "Пройден" if final_status == "успешно" else "Не пройден"
+
+                        # Читаем correct_count и notes
+                        try:
+                            correct_count = int(row[correct_col]) if len(row) > correct_col and row[correct_col] else 0
+                        except ValueError:
+                            correct_count = 0
+
+                        notes = row[notes_col] if len(row) > notes_col else None
+
                         results.append(UserResult(
                             telegram_id=str(row[id_col]),
                             date=dt,
                             campaign_name=campaign_name,
-                            final_status=final_status
+                            final_status=final_status,
+                            result=result,
+                            correct_count=correct_count,
+                            notes=notes
                         ))
                     except (ValueError, IndexError) as e:
                         logger.warning(f"Ошибка парсинга результата для пользователя {telegram_id}: {e}")
@@ -370,6 +409,8 @@ class GoogleSheetsService:
 
                 try:
                     status_str = row[status_col].strip() if status_col < len(row) else ""
+                    # Нормализуем статус (подтвержден -> подтверждён)
+                    status_str = self._normalize_status(status_str)
                     if UserStatus(status_str) != UserStatus.CONFIRMED:
                         continue
 
@@ -515,7 +556,7 @@ class GoogleSheetsService:
     def get_last_test_time(self, telegram_id: int, campaign_name: Optional[str] = None) -> Optional[float]:
         """Get timestamp of last test attempt for user."""
         try:
-            range_name = f"{RESULTS_SHEET}!A:I"
+            range_name = f"{RESULTS_SHEET}!A:H"  # 8 columns
             result = self._retry_request(
                 self.service.spreadsheets().values().get,
                 spreadsheetId=self.sheet_id,
@@ -532,7 +573,8 @@ class GoogleSheetsService:
                 if str(row[0]) != telegram_id_str:
                     continue
 
-                row_campaign = row[8] if len(row) > 8 else ""
+                # Колонка H "название кампании" = индекс 7 (8-я колонка, индексация с 0)
+                row_campaign = row[7] if len(row) > 7 else ""
                 logger.info(f"Found row for user {telegram_id_str}: row_campaign='{row_campaign}', date={row[2] if len(row) > 2 else 'N/A'}")
 
                 if campaign_name is None or campaign_name == "":
@@ -560,15 +602,21 @@ class GoogleSheetsService:
                      correct_count: int, campaign_name: str, final_status: str, notes: Optional[str] = None):
         """Записывает результат теста в лист Результаты."""
         try:
-            # Новый порядок: без 'Результат'
+            # Правильный порядок колонок A:H (8 колонок, БЕЗ колонки "Результат")
             values = [[
-                str(telegram_id), display_name or '', test_date, fio,
-                str(correct_count), notes or '', final_status, campaign_name
+                str(telegram_id),       # A: telegram_id
+                display_name or '',     # B: username
+                test_date,              # C: дата
+                fio,                    # D: ФИО
+                str(correct_count),     # E: количество верных ответов
+                notes or '',            # F: примечания
+                final_status,           # G: итоговый статус (успешно/не пройдено/разрешена пересдача)
+                campaign_name or ''     # H: название кампании
             ]]
             logger.info(f"Writing result: telegram_id={telegram_id}, campaign_name='{campaign_name}', final_status='{final_status}', date={test_date}")
             body = {'values': values}
 
-            # Диапазон теперь A:H, но append работает и без указания последней колонки
+            # Диапазон A:H (8 колонок)
             range_to_append = f"{RESULTS_SHEET}!A:H"
 
             append_result = self._retry_request(
@@ -589,7 +637,7 @@ class GoogleSheetsService:
                                 'range': {
                                     'sheetId': sheet_id,
                                     'startRowIndex': row_number - 1, 'endRowIndex': row_number,
-                                    'startColumnIndex': 0, 'endColumnIndex': 8 # 8 колонок
+                                    'startColumnIndex': 0, 'endColumnIndex': 8 # 8 колонок (A:H)
                                 },
                                 'cell': {'userEnteredFormat': {}},
                                 'fields': 'userEnteredFormat'
@@ -633,7 +681,7 @@ class GoogleSheetsService:
             List of CampaignStats objects
         """
         try:
-            range_name = f"{RESULTS_SHEET}!A:I"
+            range_name = f"{RESULTS_SHEET}!A:H"  # 8 колонок
             result = self._retry_request(
                 self.service.spreadsheets().values().get,
                 spreadsheetId=self.sheet_id,
@@ -645,9 +693,9 @@ class GoogleSheetsService:
 
             headers = [h.lower().strip() for h in values[0]]
             try:
-                campaign_col = headers.index("название кампании")
-                status_col = headers.index("итоговый статус")
-                correct_col = headers.index("количество верных ответов")
+                campaign_col = headers.index("название кампании")  # Должна быть колонка H (индекс 7)
+                status_col = headers.index("итоговый статус")      # Должна быть колонка G (индекс 6)
+                correct_col = headers.index("количество верных ответов")  # Должна быть колонка E (индекс 4)
             except ValueError as e:
                 logger.error(
                     f"В листе '{RESULTS_SHEET}' отсутствует обязательная "

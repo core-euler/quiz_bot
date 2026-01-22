@@ -98,6 +98,8 @@ class NotificationService:
 
                 telegram_id = str(row[id_col])
                 status_str = row[status_col].strip() if status_col < len(row) else ""
+                # Нормализуем статус (подтвержден -> подтверждён)
+                status_str = GoogleSheetsService._normalize_status(status_str)
 
                 # Only notify confirmed users
                 if status_str != UserStatus.CONFIRMED.value:

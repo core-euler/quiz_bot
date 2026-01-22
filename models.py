@@ -93,6 +93,9 @@ class UserResult:
     campaign_name: str
     final_status: str
     date: datetime
+    result: str  # "Пройден" или "Не пройден" (для обратной совместимости можно вычислять из final_status)
+    correct_count: int  # Количество верных ответов
+    notes: Optional[str] = None  # Примечания
 
 
 @dataclass

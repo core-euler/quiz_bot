@@ -136,11 +136,29 @@ async def cmd_stats_user(message: Message, google_sheets: GoogleSheetsService):
         for idx, result in enumerate(results, 1):
             date_str = result.date.strftime("%d.%m.%Y %H:%M")
             status_emoji = "✅" if result.final_status == "успешно" else "❌"
+
+            # Определяем название теста
+            if result.campaign_name:
+                test_name = result.campaign_name
+                # Получаем тип кампании из Google Sheets
+                campaign = google_sheets.get_campaign_by_name(result.campaign_name)
+                campaign_type = f" ({campaign.type.value})" if campaign else ""
+            else:
+                test_name = "Основной тест"
+                campaign_type = ""
+
             response += (
-                f"{idx}. {status_emoji} {result.campaign_name}\n"
+                f"{idx}. {status_emoji} {test_name}{campaign_type}\n"
                 f"   Дата: {date_str}\n"
-                f"   Статус: {result.final_status}\n\n"
+                f"   Результат: {result.result}\n"
+                f"   Верных ответов: {result.correct_count}\n"
             )
+
+            # Добавляем примечания, если есть
+            if result.notes:
+                response += f"   📝 {result.notes}\n"
+
+            response += "\n"
 
         await message.answer(response)
         logger.info(
