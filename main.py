@@ -10,6 +10,10 @@ from handlers import appeals, admin # Импортируем appeals и admin ha
 from middlewares.access_middleware import AccessMiddleware # Импортируем middleware
 from services.redis_service import RedisService
 from services.google_sheets import GoogleSheetsService # Импортируем GoogleSheetsService
+from services.plandriver.plandriver_mapper import PlanDriverMapper
+from services.plandriver.plandriver_result_sender import PlanDriverResultSender
+from services.plandriver.plandriver_storage import PlanDriverStorage
+from services.plandriver.plandriver_client import PlanDriverClient
 from services.scheduler import SchedulerService # Импортируем SchedulerService
 
 # Настройка логирования
@@ -23,6 +27,12 @@ logger = logging.getLogger(__name__)
 
 redis_service = RedisService()
 google_sheets_service = GoogleSheetsService() # Создаем экземпляр GoogleSheetsService
+plandriver_storage = PlanDriverStorage()
+plandriver_mapper = PlanDriverMapper()
+plandriver_result_sender = PlanDriverResultSender(
+    client=PlanDriverClient(),
+    storage=plandriver_storage,
+)
 
 
 async def main():
@@ -70,6 +80,9 @@ async def main():
     # Передача зависимостей
     dp["google_sheets"] = google_sheets_service
     dp["redis_service"] = redis_service # redis_service уже глобально, но для единообразия
+    dp["plandriver_storage"] = plandriver_storage
+    dp["plandriver_mapper"] = plandriver_mapper
+    dp["plandriver_result_sender"] = plandriver_result_sender
 
     # Инициализация и запуск scheduler
     scheduler_service = SchedulerService(bot, google_sheets_service, redis_service)
@@ -96,4 +109,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
         sys.exit(1)
-

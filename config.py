@@ -27,6 +27,21 @@ class Config:
 
     # Scheduler settings
     CAMPAIGN_CHECK_INTERVAL_MINUTES = int(os.getenv("CAMPAIGN_CHECK_INTERVAL_MINUTES", "1"))
+    PLANDRIVER_ENABLED = os.getenv("PLANDRIVER_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+    PLANDRIVER_BASE_URL = os.getenv("PLANDRIVER_BASE_URL", "https://prog.lagrangegroup.ru")
+    PLANDRIVER_TOKEN = os.getenv("PLANDRIVER_TOKEN")
+    PLANDRIVER_POLL_INTERVAL_MINUTES = int(os.getenv("PLANDRIVER_POLL_INTERVAL_MINUTES", "5"))
+    PLANDRIVER_DB_PATH = os.getenv("PLANDRIVER_DB_PATH", os.path.join(os.getcwd(), "data", "plandriver.db"))
+    PLANDRIVER_TEST_MODE = os.getenv("PLANDRIVER_TEST_MODE", "false").lower() in {"1", "true", "yes", "on"}
+    PLANDRIVER_PENDING_TESTS_JSON = os.getenv(
+        "PLANDRIVER_PENDING_TESTS_JSON",
+        os.path.join(os.getcwd(), "plandriver_pending_tests_response.json"),
+    )
+    PLANDRIVER_TEST_MAPPING_RAW = os.getenv("PLANDRIVER_TEST_MAPPING", "{}")
+    try:
+        PLANDRIVER_TEST_MAPPING = json.loads(PLANDRIVER_TEST_MAPPING_RAW)
+    except json.JSONDecodeError as exc:
+        raise ValueError("PLANDRIVER_TEST_MAPPING должен быть валидным JSON") from exc
 
     # Google Sheets credentials
     _credentials_value = os.getenv("GOOGLE_CREDENTIALS")
@@ -52,4 +67,5 @@ class Config:
             raise ValueError("TELEGRAM_TOKEN не установлен")
         if not cls.SHEET_ID:
             raise ValueError("SHEET_ID не установлен")
-
+        if cls.PLANDRIVER_ENABLED and not cls.PLANDRIVER_TEST_MODE and not cls.PLANDRIVER_TOKEN:
+            raise ValueError("PLANDRIVER_TOKEN не установлен при включенном PLANDRIVER_ENABLED")

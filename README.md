@@ -124,6 +124,15 @@ REDIS_URL="redis://redis:6379/0"
 
 # --- Logging ---
 LOG_LEVEL="INFO"
+
+# --- PlanDriver ---
+PLANDRIVER_ENABLED=true
+PLANDRIVER_BASE_URL="https://prog.lagrangegroup.ru"
+PLANDRIVER_TOKEN="YOUR_PLANDRIVER_BOT_TOKEN"
+PLANDRIVER_POLL_INTERVAL_MINUTES=5
+PLANDRIVER_DB_PATH="/absolute/path/to/plandriver.db"
+# Fill after confirming real question categories in Google Sheets
+PLANDRIVER_TEST_MAPPING='{}'
 ```
 
 ### 3. Running the Bot
@@ -161,6 +170,24 @@ docker-compose up -d --build
     ```bash
     python main.py
     ```
+
+## PlanDriver Integration
+
+To verify the backend path to PlanDriver, the bot only needs valid env values and access to the target Google Sheet.
+
+Minimal steps:
+
+1. Set `PLANDRIVER_ENABLED=true`
+2. Fill `PLANDRIVER_TOKEN`
+3. Start the bot
+4. Watch logs for:
+   - successful `PlanDriver Sync`
+   - response from `GET /api/bot/pending-tests`
+   - driver mapping result
+   - assignment creation in local SQLite
+   - Telegram delivery result
+
+At first start, `PLANDRIVER_TEST_MAPPING='{}'` is acceptable if the goal is only to confirm requests to the external backend. A real test launch still requires confirmed question categories in Google Sheets.
 
 ## Project Structure
 

@@ -61,6 +61,13 @@ class GoogleSheetsService:
         logger.error(f"Не удалось выполнить запрос после {self.max_retries} попыток")
         raise last_error
 
+    @staticmethod
+    def _find_optional_column(headers: List[str], *names: str) -> Optional[int]:
+        for name in names:
+            if name in headers:
+                return headers.index(name)
+        return None
+
     def add_user(self, telegram_id: str, phone_number: str, fio: str, motorcade: str, status: str = "ожидает"):
         try:
             values = [[telegram_id, phone_number, fio, motorcade, status]]
@@ -101,7 +108,7 @@ class GoogleSheetsService:
 
     def get_user_info(self, telegram_id: str) -> Optional[UserInfo]:
         try:
-            range_name = f"{USERS_SHEET}!A:E"
+            range_name = f"{USERS_SHEET}!A:Z"
             result = self._retry_request(
                 self.service.spreadsheets().values().get,
                 spreadsheetId=self.sheet_id,
@@ -118,6 +125,7 @@ class GoogleSheetsService:
                 fio_col = headers.index('фио')
                 motorcade_col = headers.index('автоколонна')
                 status_col = headers.index('статус')
+                personnel_col = self._find_optional_column(headers, 'табельный номер', 'personnel_number')
             except ValueError as e:
                 logger.error(f"В листе '{USERS_SHEET}' отсутствует обязательная колонка: {e}")
                 return None
@@ -134,7 +142,8 @@ class GoogleSheetsService:
                             phone=row[phone_col],
                             fio=row[fio_col],
                             motorcade=row[motorcade_col],
-                            status=status
+                            status=status,
+                            personnel_number=row[personnel_col] if personnel_col is not None and personnel_col < len(row) else None,
                         )
                     except (ValueError, IndexError):
                         original_status = row[status_col] if status_col < len(row) else "[СТАТУС НЕ НАЙДЕН]"
@@ -148,7 +157,8 @@ class GoogleSheetsService:
                             phone=row[phone_col],
                             fio=row[fio_col],
                             motorcade=row[motorcade_col],
-                            status=UserStatus.AWAITS
+                            status=UserStatus.AWAITS,
+                            personnel_number=row[personnel_col] if personnel_col is not None and personnel_col < len(row) else None,
                         )
             return None
         except Exception as e:
@@ -382,7 +392,7 @@ class GoogleSheetsService:
         """Возвращает список подтвержденных пользователей, которым назначена кампания."""
         target_users = []
         try:
-            range_name = f"{USERS_SHEET}!A:E"
+            range_name = f"{USERS_SHEET}!A:Z"
             result = self._retry_request(
                 self.service.spreadsheets().values().get,
                 spreadsheetId=self.sheet_id,
@@ -399,6 +409,7 @@ class GoogleSheetsService:
                 fio_col = headers.index('фио')
                 motorcade_col = headers.index('автоколонна')
                 status_col = headers.index('статус')
+                personnel_col = self._find_optional_column(headers, 'табельный номер', 'personnel_number')
             except ValueError as e:
                 logger.error(f"В листе '{USERS_SHEET}' отсутствует обязательная колонка: {e}")
                 return []
@@ -427,7 +438,8 @@ class GoogleSheetsService:
                             phone=row[phone_col] if phone_col < len(row) else "",
                             fio=row[fio_col] if fio_col < len(row) else "",
                             motorcade=user_motorcade,
-                            status=UserStatus.CONFIRMED
+                            status=UserStatus.CONFIRMED,
+                            personnel_number=row[personnel_col] if personnel_col is not None and personnel_col < len(row) else None,
                         ))
                 except (ValueError, IndexError) as e:
                     logger.warning(f"Ошибка парсинга пользователя в строке {row}: {e}")
@@ -438,6 +450,105 @@ class GoogleSheetsService:
         except Exception as e:
             logger.error(f"Ошибка получения целевых пользователей для кампании '{campaign.name}': {e}")
             return []
+
+    def find_confirmed_users_by_fio(self, fio: str) -> List[UserInfo]:
+        """Ищет подтвержденных пользователей по точному ФИО."""
+        target_users = []
+        normalized_fio = fio.strip().casefold()
+        try:
+            range_name = f"{USERS_SHEET}!A:Z"
+            result = self._retry_request(
+                self.service.spreadsheets().values().get,
+                spreadsheetId=self.sheet_id,
+                range=range_name
+            )
+            values = result.get('values', [])
+            if len(values) < 2:
+                return []
+
+            headers = [h.lower().strip() for h in values[0]]
+            id_col = headers.index('telegram_id')
+            phone_col = headers.index('телефон')
+            fio_col = headers.index('фио')
+            motorcade_col = headers.index('автоколонна')
+            status_col = headers.index('статус')
+            personnel_col = self._find_optional_column(headers, 'табельный номер', 'personnel_number')
+
+            for row in values[1:]:
+                if len(row) <= max(id_col, fio_col, status_col):
+                    continue
+
+                row_fio = row[fio_col].strip().casefold()
+                status_str = self._normalize_status(row[status_col])
+                if row_fio != normalized_fio or UserStatus(status_str) != UserStatus.CONFIRMED:
+                    continue
+
+                target_users.append(UserInfo(
+                    telegram_id=str(row[id_col]),
+                    phone=row[phone_col] if phone_col < len(row) else "",
+                    fio=row[fio_col],
+                    motorcade=row[motorcade_col] if motorcade_col < len(row) else "",
+                    status=UserStatus.CONFIRMED,
+                    personnel_number=row[personnel_col] if personnel_col is not None and personnel_col < len(row) else None,
+                ))
+        except ValueError as e:
+            logger.error(f"В листе '{USERS_SHEET}' отсутствует обязательная колонка: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка поиска пользователя по ФИО '{fio}': {e}")
+        return target_users
+
+    def find_confirmed_users_by_personnel_number(self, personnel_number: str) -> List[UserInfo]:
+        """Ищет подтвержденных пользователей по табельному номеру, если колонка есть в листе."""
+        target_users = []
+        target_number = personnel_number.strip()
+        if not target_number:
+            return []
+
+        try:
+            range_name = f"{USERS_SHEET}!A:Z"
+            result = self._retry_request(
+                self.service.spreadsheets().values().get,
+                spreadsheetId=self.sheet_id,
+                range=range_name
+            )
+            values = result.get('values', [])
+            if len(values) < 2:
+                return []
+
+            headers = [h.lower().strip() for h in values[0]]
+            personnel_col = self._find_optional_column(headers, 'табельный номер', 'personnel_number')
+            if personnel_col is None:
+                return []
+
+            id_col = headers.index('telegram_id')
+            phone_col = headers.index('телефон')
+            fio_col = headers.index('фио')
+            motorcade_col = headers.index('автоколонна')
+            status_col = headers.index('статус')
+
+            for row in values[1:]:
+                if len(row) <= max(id_col, personnel_col, status_col):
+                    continue
+                if row[personnel_col].strip() != target_number:
+                    continue
+
+                status_str = self._normalize_status(row[status_col])
+                if UserStatus(status_str) != UserStatus.CONFIRMED:
+                    continue
+
+                target_users.append(UserInfo(
+                    telegram_id=str(row[id_col]),
+                    phone=row[phone_col] if phone_col < len(row) else "",
+                    fio=row[fio_col] if fio_col < len(row) else "",
+                    motorcade=row[motorcade_col] if motorcade_col < len(row) else "",
+                    status=UserStatus.CONFIRMED,
+                    personnel_number=row[personnel_col],
+                ))
+        except ValueError as e:
+            logger.error(f"В листе '{USERS_SHEET}' отсутствует обязательная колонка: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка поиска пользователя по табельному номеру '{personnel_number}': {e}")
+        return target_users
 
     def read_admin_config(self) -> AdminConfig:
         try:
@@ -773,4 +884,3 @@ class GoogleSheetsService:
         except Exception as e:
             logger.error(f"Ошибка получения статистики кампаний: {e}", exc_info=True)
             return []
-

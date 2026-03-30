@@ -13,6 +13,8 @@ from aiogram.types import (CallbackQuery, InlineKeyboardButton,
 from config import Config
 from models import CampaignType
 from services.google_sheets import AdminConfigError, GoogleSheetsService
+from services.plandriver.plandriver_mapper import PlanDriverMapper
+from services.plandriver.plandriver_storage import PlanDriverStorage
 from handlers.states import Registration, TestStates
 
 
@@ -218,7 +220,12 @@ async def start_test_callback(callback_query: CallbackQuery, state: FSMContext, 
             "first_name": callback_query.from_user.first_name,
             "last_name": callback_query.from_user.last_name,
         }
-        await state.update_data(fio=user_info.fio, user_data=user_data)
+        await state.update_data(
+            fio=user_info.fio,
+            user_data=user_data,
+            question_categories=None,
+            external_test_context=None,
+        )
 
         # Если это основной тест, еще раз убедимся, что данных кампании нет
         if callback_query.data == "start_init_test":
@@ -269,6 +276,87 @@ async def start_appeal_callback(callback_query: CallbackQuery, state: FSMContext
         reply_markup=keyboard
     )
     logger.info(f"User {callback_query.from_user.id} started appeal flow via menu button")
+
+
+@router.callback_query(F.data.startswith("plandriver:start:"))
+async def start_plandriver_callback(
+    callback_query: CallbackQuery,
+    state: FSMContext,
+    google_sheets: GoogleSheetsService,
+    plandriver_storage: PlanDriverStorage,
+    plandriver_mapper: PlanDriverMapper,
+):
+    """Запускает тест, назначенный через PlanDriver."""
+    await callback_query.answer()
+    user_id = str(callback_query.from_user.id)
+
+    try:
+        violation_id = int(callback_query.data.rsplit(":", 1)[1])
+        assignment = plandriver_storage.get_violation(violation_id)
+        if not assignment or assignment.telegram_id != user_id:
+            await callback_query.message.answer("⚠️ Это задание больше недоступно.")
+            return
+
+        admin_config = google_sheets.read_admin_config()
+        assignment_name = plandriver_mapper.get_assignment_name(assignment.violation_type_code)
+        last_test_time = google_sheets.get_last_test_time(int(user_id), campaign_name=assignment_name)
+        if last_test_time:
+            hours_passed = (time.time() - last_test_time) / 3600
+            hours_required = admin_config.retry_hours
+            if hours_passed < hours_required:
+                hours_remaining = hours_required - hours_passed
+                if hours_remaining >= 1:
+                    time_msg = f"{int(hours_remaining)} ч."
+                else:
+                    minutes_remaining = max(1, int(hours_remaining * 60))
+                    time_msg = f"{minutes_remaining} мин."
+
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="Начать тест",
+                        callback_data=f"plandriver:start:{assignment.violation_id}"
+                    )
+                ]])
+                await callback_query.message.answer(
+                    f"⏳ Вы не сдали тест «{assignment_name}».\n\n"
+                    f"Повторная попытка будет доступна через {time_msg}",
+                    reply_markup=keyboard,
+                )
+                return
+
+        user_info = google_sheets.get_user_info(user_id)
+        if not user_info or not user_info.fio:
+            await callback_query.message.answer("⚠️ Не удалось найти ваше ФИО в системе. Пожалуйста, обратитесь к администратору.")
+            return
+
+        user_data = {
+            "id": callback_query.from_user.id,
+            "username": callback_query.from_user.username,
+            "first_name": callback_query.from_user.first_name,
+            "last_name": callback_query.from_user.last_name,
+        }
+        await state.update_data(
+            fio=user_info.fio,
+            user_data=user_data,
+            campaign_name=assignment_name,
+            mode=None,
+            question_categories=assignment.question_categories or [],
+            external_test_context={
+                "source": "plandriver",
+                "violation_id": assignment.violation_id,
+                "driver_id": assignment.driver_id,
+                "attestation_id": assignment.attestation_id,
+                "violation_type_code": assignment.violation_type_code,
+            },
+        )
+        plandriver_storage.update_violation_status(assignment.violation_id, status="sent", telegram_id=user_id)
+
+        from handlers.test import prepare_test
+        await state.set_state(TestStates.PREPARE_TEST)
+        await prepare_test(callback_query.message, state)
+    except Exception as e:
+        logger.error(f"Ошибка запуска PlanDriver теста: {e}", exc_info=True)
+        await callback_query.message.answer("Произошла ошибка при подготовке теста. Попробуйте позже.")
 
 
 @router.callback_query(F.data.startswith("campaign:"))
@@ -330,7 +418,9 @@ async def start_campaign_callback(callback_query: CallbackQuery, state: FSMConte
             fio=user_info.fio,
             user_data=user_data,
             campaign_name=campaign.name,
-            mode=campaign.type.value
+            mode=campaign.type.value,
+            question_categories=None,
+            external_test_context=None,
         )
 
         logger.info(f"Пользователь {user_id} (ФИО: {user_info.fio}) начинает кампанию '{campaign.name}' (тип: {campaign.type.value}).")

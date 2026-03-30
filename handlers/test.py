@@ -14,6 +14,9 @@ from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKe
 from handlers.states import TestStates
 from models import CampaignType, Question, Session
 from services.google_sheets import GoogleSheetsService
+from services.plandriver.plandriver_client import PlanDriverClient
+from services.plandriver.plandriver_result_sender import PlanDriverResultSender
+from services.plandriver.plandriver_storage import PlanDriverStorage
 from services.redis_service import RedisService
 from utils.question_distribution import distribute_questions_by_category
 
@@ -22,11 +25,20 @@ router = Router()
 
 sheets_service = GoogleSheetsService()
 redis_service = RedisService()
+plandriver_storage = PlanDriverStorage()
+plandriver_result_sender = PlanDriverResultSender(PlanDriverClient(), plandriver_storage)
 
 
 class AnswerCallback(CallbackData, prefix="answer"):
     question_index: int
     answer: int
+
+
+def _filter_questions_by_categories(questions: list[Question], categories: list[str]) -> list[Question]:
+    normalized = {item.strip().casefold() for item in categories if item and item.strip()}
+    if not normalized:
+        return questions
+    return [question for question in questions if question.category.strip().casefold() in normalized]
 
 
 async def prepare_test(message: Message, state: FSMContext):
@@ -38,22 +50,25 @@ async def prepare_test(message: Message, state: FSMContext):
     try:
         admin_config = sheets_service.read_admin_config()
         all_questions = sheets_service.read_questions()
+        data = await state.get_data()
+        filtered_questions = all_questions
+        question_categories = data.get("question_categories")
+
+        if question_categories:
+            filtered_questions = _filter_questions_by_categories(all_questions, question_categories)
         
-        if len(all_questions) < admin_config.num_questions:
+        if len(filtered_questions) < admin_config.num_questions:
             await message.answer("⚠️ В боте недостаточно вопросов. Обратитесь к администратору.")
             await state.clear()
             return
 
-        selected_questions = distribute_questions_by_category(all_questions, admin_config.num_questions)
+        selected_questions = distribute_questions_by_category(filtered_questions, admin_config.num_questions)
         actual_num = len(selected_questions)
 
         if actual_num < admin_config.num_questions:
             await message.answer("⚠️ Не удалось сформировать достаточное количество вопросов. Обратитесь к администратору.")
             await state.clear()
             return
-
-        data = await state.get_data()
-
         # Преобразуем mode из строки в enum если необходимо
         mode_value = data.get("mode")
         if mode_value and isinstance(mode_value, str):
@@ -241,6 +256,7 @@ async def finish_test(message: Message, state: FSMContext, passed: bool, notes: 
     # Если тест не пройден из-за таймаута, notes будет содержать причину
     final_status = "успешно" if passed else "не пройдено"
     campaign_name = session.campaign_name or ""
+    external_context = data.get("external_test_context") or {}
 
     try:
         tz = pytz.timezone("Europe/Moscow")
@@ -257,8 +273,30 @@ async def finish_test(message: Message, state: FSMContext, passed: bool, notes: 
             campaign_name=campaign_name,
             final_status=final_status,
         )
+
+        if external_context.get("source") == "plandriver":
+            total_questions = len(data.get("questions", []))
+            score = int(round((session.correct_count / total_questions) * 100)) if total_questions else 0
+            plandriver_result_sender.send_result(
+                violation_id=external_context["violation_id"],
+                driver_id=external_context["driver_id"],
+                attestation_id=external_context["attestation_id"],
+                violation_type_code=external_context["violation_type_code"],
+                passed=passed,
+                score=score,
+            )
     except Exception as e:
         logger.error(f"Ошибка записи результатов для пользователя {user_data.get('id')}: {e}")
+        if external_context.get("source") == "plandriver" and external_context.get("violation_id"):
+            total_questions = len(data.get("questions", []))
+            score = int(round((session.correct_count / total_questions) * 100)) if total_questions else 0
+            plandriver_storage.update_violation_status(
+                external_context["violation_id"],
+                status="sent",
+                passed=passed,
+                score=score,
+                last_error=str(e),
+            )
         # Попытка уведомить пользователя о сбое сохранения
         await message.answer("⚠️ Произошла ошибка при сохранении вашего результата. Пожалуйста, сообщите администратору.")
     finally:
@@ -276,8 +314,18 @@ async def finish_test(message: Message, state: FSMContext, passed: bool, notes: 
     if passed:
         await message.answer(f"✅ Тест {test_name}успешно пройден!\n\nРезультат: {session.correct_count} из {total_questions}")
     else:
-        await message.answer(f"❌ Тест {test_name}не пройден.\n\nПовторная попытка будет доступна согласно правилам.")
+        reply_markup = None
+        if external_context.get("source") == "plandriver" and external_context.get("violation_id"):
+            reply_markup = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Начать тест",
+                    callback_data=f"plandriver:start:{external_context['violation_id']}"
+                )
+            ]])
+        await message.answer(
+            f"❌ Тест {test_name}не пройден.\n\nПовторная попытка будет доступна согласно правилам.",
+            reply_markup=reply_markup,
+        )
 
     await redis_service.delete_session(user_data["id"])
     await state.clear()
-

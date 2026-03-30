@@ -77,6 +77,7 @@ class UserInfo:
     fio: str
     motorcade: str
     status: UserStatus
+    personnel_number: Optional[str] = None
 
 
 @dataclass
@@ -109,3 +110,33 @@ class CampaignStats:
     pass_rate: float
     avg_correct_answers: float
 
+
+@dataclass
+class DriverMapping:
+    driver_id: int
+    telegram_id: str
+    personnel_number: Optional[str] = None
+    full_name: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+@dataclass
+class ExternalViolation:
+    violation_id: int
+    driver_id: int
+    attestation_id: int
+    violation_type_code: str
+    violation_type_name: Optional[str] = None
+    comment: Optional[str] = None
+    deadline: Optional[str] = None
+    driver_name: Optional[str] = None
+    personnel_number: Optional[str] = None
+    telegram_id: Optional[str] = None
+    question_categories: Optional[List[str]] = None
+    status: str = "new"
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    passed: Optional[bool] = None
+    score: Optional[int] = None
+    last_error: Optional[str] = None
