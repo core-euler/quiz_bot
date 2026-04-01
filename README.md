@@ -131,8 +131,7 @@ PLANDRIVER_BASE_URL="https://prog.lagrangegroup.ru"
 PLANDRIVER_TOKEN="YOUR_PLANDRIVER_BOT_TOKEN"
 PLANDRIVER_POLL_INTERVAL_MINUTES=5
 PLANDRIVER_DB_PATH="/absolute/path/to/plandriver.db"
-# Fill after confirming real question categories in Google Sheets
-PLANDRIVER_TEST_MAPPING='{}'
+PLANDRIVER_TEST_MAPPING='{"1":"Логистика","2":"Логистика","3":"Логистика","5":"Техническая часть","7":"Правила компании","11":"Правила компании","12":"Правила компании","13":"Работа с документацией","14":"Экономия топлива"}'
 ```
 
 ### 3. Running the Bot
@@ -187,7 +186,39 @@ Minimal steps:
    - assignment creation in local SQLite
    - Telegram delivery result
 
-At first start, `PLANDRIVER_TEST_MAPPING='{}'` is acceptable if the goal is only to confirm requests to the external backend. A real test launch still requires confirmed question categories in Google Sheets.
+Recommended live mapping:
+
+```json
+{
+  "1": "Логистика",
+  "2": "Логистика",
+  "3": "Логистика",
+  "5": "Техническая часть",
+  "7": "Правила компании",
+  "11": "Правила компании",
+  "12": "Правила компании",
+  "13": "Работа с документацией",
+  "14": "Экономия топлива"
+}
+```
+
+Google Sheets rules for the `❓Вопросы` sheet:
+
+- use the `категория` column
+- use only these canonical category names:
+  - `Логистика`
+  - `Техническая часть`
+  - `Правила компании`
+  - `Работа с документацией`
+  - `Экономия топлива`
+- do not put numeric violation codes into `категория`
+
+Important:
+
+- live API uses numeric violation codes `"1"` ... `"14"`
+- critical codes are `4`, `6`, `8`, `9`, `10`
+- non-critical codes for online training are `1`, `2`, `3`, `5`, `7`,
+  `11`, `12`, `13`, `14`
 
 ## Project Structure
 

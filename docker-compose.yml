@@ -11,7 +11,10 @@ services:
       - redis
     env_file:
       - .env
+    volumes:
+      - bot_data:/app/data
     restart: unless-stopped
 
 volumes:
   redis_data:
+  bot_data:

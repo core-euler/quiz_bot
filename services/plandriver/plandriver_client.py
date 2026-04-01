@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ class PlanDriverClient:
         self.test_mode = Config.PLANDRIVER_TEST_MODE
         self.pending_tests_json_path = Config.PLANDRIVER_PENDING_TESTS_JSON
 
-    def _load_pending_tests_from_file(self) -> Dict[str, Any]:
+    def _load_pending_tests_from_file_sync(self) -> Dict[str, Any]:
         path = os.path.abspath(self.pending_tests_json_path)
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f)
@@ -30,7 +31,10 @@ class PlanDriverClient:
             "Accept": "application/json",
         }
 
-    def _request(
+    async def _load_pending_tests_from_file(self) -> Dict[str, Any]:
+        return await asyncio.to_thread(self._load_pending_tests_from_file_sync)
+
+    def _request_sync(
         self,
         method: str,
         path: str,
@@ -53,17 +57,32 @@ class PlanDriverClient:
         except error.HTTPError as exc:
             response_body = exc.read().decode("utf-8", errors="ignore")
             logger.error("PlanDriver HTTP error %s for %s %s: %s", exc.code, method, path, response_body)
-            raise
+            raise RuntimeError(f"PlanDriver HTTP {exc.code}: {response_body}") from exc
         except error.URLError as exc:
             logger.error("PlanDriver connection error for %s %s: %s", method, path, exc)
             raise
 
-    def get_pending_tests(self) -> Dict[str, Any]:
-        if self.test_mode:
-            return self._load_pending_tests_from_file()
-        return self._request("GET", "/api/bot/pending-tests")
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[Dict[str, Any]] = None,
+        query: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return await asyncio.to_thread(
+            self._request_sync,
+            method,
+            path,
+            payload,
+            query,
+        )
 
-    def send_test_result(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def get_pending_tests(self) -> Dict[str, Any]:
+        if self.test_mode:
+            return await self._load_pending_tests_from_file()
+        return await self._request("GET", "/api/bot/pending-tests")
+
+    async def send_test_result(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if self.test_mode:
             logger.info(
                 "PlanDriver test mode: skipping POST /api/bot/test-result; payload=%s",
@@ -74,4 +93,4 @@ class PlanDriverClient:
                 "message": "POST /api/bot/test-result skipped in PLANDRIVER_TEST_MODE",
                 "payload": payload,
             }
-        return self._request("POST", "/api/bot/test-result", payload=payload)
+        return await self._request("POST", "/api/bot/test-result", payload=payload)

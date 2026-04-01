@@ -59,7 +59,20 @@ class PlanDriverStorage:
                 """
             )
             conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS external_violation_recipients (
+                    violation_id INTEGER NOT NULL,
+                    telegram_id TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (violation_id, telegram_id)
+                )
+                """
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_external_violations_telegram_status ON external_violations (telegram_id, status)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_external_violation_recipients_telegram ON external_violation_recipients (telegram_id)"
             )
 
     @staticmethod
@@ -211,12 +224,57 @@ class PlanDriverStorage:
                 values,
             )
 
+    def add_violation_recipients(self, violation_id: int, telegram_ids: List[str]):
+        cleaned_ids = [str(telegram_id).strip() for telegram_id in telegram_ids if str(telegram_id).strip()]
+        if not cleaned_ids:
+            return
+
+        now = self._now()
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO external_violation_recipients (violation_id, telegram_id, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(violation_id, telegram_id) DO UPDATE SET
+                    updated_at = excluded.updated_at
+                """,
+                [(violation_id, telegram_id, now) for telegram_id in cleaned_ids],
+            )
+
+    def get_violation_recipient_ids(self, violation_id: int) -> List[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT telegram_id
+                FROM external_violation_recipients
+                WHERE violation_id = ?
+                ORDER BY telegram_id ASC
+                """,
+                (violation_id,),
+            ).fetchall()
+        return [str(row["telegram_id"]) for row in rows]
+
+    def is_violation_recipient(self, violation_id: int, telegram_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM external_violation_recipients
+                WHERE violation_id = ? AND telegram_id = ?
+                """,
+                (violation_id, str(telegram_id)),
+            ).fetchone()
+        return row is not None
+
     def get_pending_assignments_for_user(self, telegram_id: str) -> List[ExternalViolation]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT * FROM external_violations
-                WHERE telegram_id = ? AND status = 'sent'
+                SELECT ev.*
+                FROM external_violations ev
+                JOIN external_violation_recipients evr
+                    ON evr.violation_id = ev.violation_id
+                WHERE evr.telegram_id = ? AND ev.status = 'sent'
                 ORDER BY created_at ASC
                 """,
                 (telegram_id,),
@@ -231,5 +289,17 @@ class PlanDriverStorage:
                 WHERE attestation_id = ? AND status != 'completed'
                 """,
                 (attestation_id,),
+            ).fetchall()
+        return [self._row_to_violation(row) for row in rows]
+
+    def get_result_retry_candidates(self) -> List[ExternalViolation]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM external_violations
+                WHERE status IN ('result_pending', 'result_failed')
+                ORDER BY updated_at ASC
+                """
             ).fetchall()
         return [self._row_to_violation(row) for row in rows]

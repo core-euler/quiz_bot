@@ -10,6 +10,7 @@ from services.google_sheets import GoogleSheetsService
 from services.notification_service import NotificationService
 from services.plandriver.plandriver_client import PlanDriverClient
 from services.plandriver.plandriver_mapper import PlanDriverMapper
+from services.plandriver.plandriver_result_sender import PlanDriverResultSender
 from services.plandriver.plandriver_storage import PlanDriverStorage
 from services.plandriver.plandriver_sync import PlanDriverSyncService
 from services.redis_service import RedisService
@@ -27,14 +28,21 @@ class SchedulerService:
         self.notification_service = NotificationService(google_sheets)
         self.scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
         self.plandriver_sync_service = None
+        self.plandriver_result_sender = None
 
         if Config.PLANDRIVER_ENABLED:
+            plandriver_storage = PlanDriverStorage()
+            plandriver_client = PlanDriverClient()
             self.plandriver_sync_service = PlanDriverSyncService(
                 bot=bot,
                 google_sheets=google_sheets,
-                storage=PlanDriverStorage(),
-                client=PlanDriverClient(),
+                storage=plandriver_storage,
+                client=plandriver_client,
                 mapper=PlanDriverMapper(),
+            )
+            self.plandriver_result_sender = PlanDriverResultSender(
+                client=plandriver_client,
+                storage=plandriver_storage,
             )
 
         logger.info("SchedulerService initialized with timezone Europe/Moscow")
@@ -78,12 +86,21 @@ class SchedulerService:
             logger.info("Scheduler shut down successfully")
 
     async def sync_plandriver_job(self):
+        """Run PlanDriver sync and retry delivery as independent steps."""
         if not self.plandriver_sync_service:
             return
         try:
             await self.plandriver_sync_service.sync_pending_tests()
         except Exception as e:
-            logger.error("Error in sync_plandriver_job: %s", e, exc_info=True)
+            logger.error("Error in PlanDriver sync job: %s", e, exc_info=True)
+
+        if not self.plandriver_result_sender:
+            return
+
+        try:
+            await self.plandriver_result_sender.retry_pending_results()
+        except Exception as e:
+            logger.error("Error in PlanDriver retry job: %s", e, exc_info=True)
 
     async def check_new_campaigns_job(self):
         """Periodically checks for new campaigns and notifies users."""

@@ -11,10 +11,12 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
 
+from config import Config
 from handlers.states import TestStates
 from models import CampaignType, Question, Session
 from services.google_sheets import GoogleSheetsService
 from services.plandriver.plandriver_client import PlanDriverClient
+from services.plandriver.plandriver_mapper import PlanDriverMapper
 from services.plandriver.plandriver_result_sender import PlanDriverResultSender
 from services.plandriver.plandriver_storage import PlanDriverStorage
 from services.redis_service import RedisService
@@ -25,8 +27,12 @@ router = Router()
 
 sheets_service = GoogleSheetsService()
 redis_service = RedisService()
-plandriver_storage = PlanDriverStorage()
-plandriver_result_sender = PlanDriverResultSender(PlanDriverClient(), plandriver_storage)
+plandriver_mapper = PlanDriverMapper() if Config.PLANDRIVER_ENABLED else None
+plandriver_storage = PlanDriverStorage() if Config.PLANDRIVER_ENABLED else None
+plandriver_result_sender = (
+    PlanDriverResultSender(PlanDriverClient(), plandriver_storage)
+    if Config.PLANDRIVER_ENABLED else None
+)
 
 
 class AnswerCallback(CallbackData, prefix="answer"):
@@ -42,14 +48,17 @@ def _filter_questions_by_categories(questions: list[Question], categories: list[
 
 
 async def prepare_test(message: Message, state: FSMContext):
+    """Prepare a test session and load matching questions."""
     telegram_id = message.from_user.id
     if await redis_service.has_active_session(telegram_id):
         await message.answer("⚠️ У вас уже есть активная сессия теста. Пожалуйста, завершите ее.")
         return
 
     try:
-        admin_config = sheets_service.read_admin_config()
-        all_questions = sheets_service.read_questions()
+        admin_config, all_questions = await asyncio.gather(
+            asyncio.to_thread(sheets_service.read_admin_config),
+            asyncio.to_thread(sheets_service.read_questions),
+        )
         data = await state.get_data()
         filtered_questions = all_questions
         question_categories = data.get("question_categories")
@@ -116,6 +125,7 @@ async def prepare_test(message: Message, state: FSMContext):
 
 
 async def ask_next_question(message: Message, state: FSMContext):
+    """Send the next question in the current test session."""
     data = await state.get_data()
     session = Session.from_dict(data.get("session", {}))
     questions_data = data.get("questions", [])
@@ -163,6 +173,7 @@ async def ask_next_question(message: Message, state: FSMContext):
 
 
 async def check_timeout(message: Message, state: FSMContext, q_index: int, deadline: float):
+    """Finish the test if the current question deadline is exceeded."""
     await asyncio.sleep(deadline - time.time() + 0.5)
     data = await state.get_data()
     session_data = data.get("session")
@@ -243,6 +254,7 @@ async def process_answer(cb: CallbackQuery, callback_data: AnswerCallback, state
 
 
 async def finish_test(message: Message, state: FSMContext, passed: bool, notes: Optional[str] = None):
+    """Persist the result and send the final response to the user."""
     data = await state.get_data()
     user_data = data.get("user_data", {})
     session = Session.from_dict(data.get("session", {}))
@@ -257,62 +269,106 @@ async def finish_test(message: Message, state: FSMContext, passed: bool, notes: 
     final_status = "успешно" if passed else "не пройдено"
     campaign_name = session.campaign_name or ""
     external_context = data.get("external_test_context") or {}
+    total_questions = len(data.get("questions", []))
+    score = int(round((session.correct_count / total_questions) * 100)) if total_questions else 0
+    issues: list[str] = []
+    plandriver_delivery_status = None
 
     try:
-        tz = pytz.timezone("Europe/Moscow")
-        test_date = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
-        display_name = user_data.get("username") or f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip()
+        try:
+            tz = pytz.timezone("Europe/Moscow")
+            test_date = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
+            display_name = user_data.get("username") or (
+                f"{user_data.get('first_name', '')} "
+                f"{user_data.get('last_name', '')}"
+            ).strip()
 
-        sheets_service.write_result(
-            telegram_id=user_data["id"],
-            display_name=display_name,
-            test_date=test_date,
-            fio=session.fio,
-            correct_count=session.correct_count,
-            notes=notes,
-            campaign_name=campaign_name,
-            final_status=final_status,
-        )
+            await asyncio.to_thread(
+                sheets_service.write_result,
+                telegram_id=user_data["id"],
+                display_name=display_name,
+                test_date=test_date,
+                fio=session.fio,
+                correct_count=session.correct_count,
+                notes=notes,
+                campaign_name=campaign_name,
+                final_status=final_status,
+            )
+        except Exception as e:
+            logger.error(f"Ошибка записи результатов в Google Sheets для пользователя {user_data.get('id')}: {e}")
+            issues.append("Не удалось записать историю прохождения в Google Sheets.")
 
         if external_context.get("source") == "plandriver":
-            total_questions = len(data.get("questions", []))
-            score = int(round((session.correct_count / total_questions) * 100)) if total_questions else 0
-            plandriver_result_sender.send_result(
-                violation_id=external_context["violation_id"],
-                driver_id=external_context["driver_id"],
-                attestation_id=external_context["attestation_id"],
-                violation_type_code=external_context["violation_type_code"],
-                passed=passed,
-                score=score,
-            )
-    except Exception as e:
-        logger.error(f"Ошибка записи результатов для пользователя {user_data.get('id')}: {e}")
-        if external_context.get("source") == "plandriver" and external_context.get("violation_id"):
-            total_questions = len(data.get("questions", []))
-            score = int(round((session.correct_count / total_questions) * 100)) if total_questions else 0
-            plandriver_storage.update_violation_status(
-                external_context["violation_id"],
-                status="sent",
-                passed=passed,
-                score=score,
-                last_error=str(e),
-            )
-        # Попытка уведомить пользователя о сбое сохранения
-        await message.answer("⚠️ Произошла ошибка при сохранении вашего результата. Пожалуйста, сообщите администратору.")
+            violation_type_code = external_context["violation_type_code"]
+            if (
+                plandriver_mapper
+                and plandriver_mapper.is_critical_violation(violation_type_code)
+            ):
+                issues.append(
+                    "Критическое нарушение не отправляется как обычный "
+                    "онлайн-результат PlanDriver."
+                )
+            else:
+                try:
+                    result = await plandriver_result_sender.send_result(
+                        violation_id=external_context["violation_id"],
+                        driver_id=external_context["driver_id"],
+                        attestation_id=external_context["attestation_id"],
+                        violation_type_code=violation_type_code,
+                        passed=passed,
+                        score=score,
+                    )
+                    plandriver_delivery_status = result.get("delivery_status")
+                except Exception as e:
+                    logger.error(
+                        "Ошибка отправки результата в PlanDriver для "
+                        "пользователя %s: %s",
+                        user_data.get("id"),
+                        e,
+                        exc_info=True,
+                    )
+                    plandriver_delivery_status = "queued_for_retry"
+                    if plandriver_storage and external_context.get("violation_id"):
+                        await asyncio.to_thread(
+                            plandriver_storage.update_violation_status,
+                            external_context["violation_id"],
+                            status="result_failed",
+                            passed=passed,
+                            score=score,
+                            last_error=str(e),
+                        )
+
+                if plandriver_delivery_status == "queued_for_retry":
+                    issues.append(
+                        "Результат зафиксирован в боте и будет автоматически "
+                        "отправлен в PlanDriver повторно."
+                    )
+                elif plandriver_delivery_status == "already_completed":
+                    issues.append(
+                        "Этот результат уже был отправлен в PlanDriver ранее "
+                        "для этого нарушения."
+                    )
     finally:
         await state.clear()
         await redis_service.delete_session(user_data["id"])
         logger.info(f"Сессия для пользователя {user_data.get('id')} завершена и очищена.")
 
-    total_questions = len(data.get("questions", []))
     logger.info(
         f"Тест завершен для {user_data['id']}: FIO={session.fio}, status={final_status}, "
         f"correct={session.correct_count}/{total_questions}"
     )
 
     test_name = f"«{campaign_name}» " if campaign_name else ""
+    issues_text = ""
+    if issues:
+        issues_text = "\n\n" + "\n".join(f"ℹ️ {issue}" for issue in issues)
+
     if passed:
-        await message.answer(f"✅ Тест {test_name}успешно пройден!\n\nРезультат: {session.correct_count} из {total_questions}")
+        await message.answer(
+            f"✅ Тест {test_name}успешно пройден!\n\n"
+            f"Результат: {session.correct_count} из {total_questions}"
+            f"{issues_text}"
+        )
     else:
         reply_markup = None
         if external_context.get("source") == "plandriver" and external_context.get("violation_id"):
@@ -323,9 +379,8 @@ async def finish_test(message: Message, state: FSMContext, passed: bool, notes: 
                 )
             ]])
         await message.answer(
-            f"❌ Тест {test_name}не пройден.\n\nПовторная попытка будет доступна согласно правилам.",
+            f"❌ Тест {test_name}не пройден.\n\n"
+            f"Повторная попытка будет доступна согласно правилам."
+            f"{issues_text}",
             reply_markup=reply_markup,
         )
-
-    await redis_service.delete_session(user_data["id"])
-    await state.clear()

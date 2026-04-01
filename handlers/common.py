@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from datetime import datetime, timedelta
@@ -279,7 +280,7 @@ async def start_appeal_callback(callback_query: CallbackQuery, state: FSMContext
 
 
 @router.callback_query(F.data.startswith("plandriver:start:"))
-async def start_plandriver_callback(
+async def handle_start_plandriver_callback(
     callback_query: CallbackQuery,
     state: FSMContext,
     google_sheets: GoogleSheetsService,
@@ -292,14 +293,39 @@ async def start_plandriver_callback(
 
     try:
         violation_id = int(callback_query.data.rsplit(":", 1)[1])
-        assignment = plandriver_storage.get_violation(violation_id)
-        if not assignment or assignment.telegram_id != user_id:
+        assignment = await asyncio.to_thread(
+            plandriver_storage.get_violation,
+            violation_id,
+        )
+        is_recipient = await asyncio.to_thread(
+            plandriver_storage.is_violation_recipient,
+            violation_id,
+            user_id,
+        )
+        if not assignment or not (is_recipient or assignment.telegram_id == user_id):
             await callback_query.message.answer("⚠️ Это задание больше недоступно.")
             return
+        if plandriver_mapper.is_critical_violation(assignment.violation_type_code):
+            await asyncio.to_thread(
+                plandriver_storage.update_violation_status,
+                assignment.violation_id,
+                status="critical",
+                telegram_id=user_id,
+                last_error="critical_violation",
+            )
+            await callback_query.message.answer(
+                "⚠️ Это нарушение относится к критическим и не может быть "
+                "пройдено через обычный онлайн-тест в боте."
+            )
+            return
 
-        admin_config = google_sheets.read_admin_config()
+        admin_config = await asyncio.to_thread(google_sheets.read_admin_config)
         assignment_name = plandriver_mapper.get_assignment_name(assignment.violation_type_code)
-        last_test_time = google_sheets.get_last_test_time(int(user_id), campaign_name=assignment_name)
+        last_test_time = await asyncio.to_thread(
+            google_sheets.get_last_test_time,
+            int(user_id),
+            campaign_name=assignment_name,
+        )
         if last_test_time:
             hours_passed = (time.time() - last_test_time) / 3600
             hours_required = admin_config.retry_hours
@@ -324,7 +350,7 @@ async def start_plandriver_callback(
                 )
                 return
 
-        user_info = google_sheets.get_user_info(user_id)
+        user_info = await asyncio.to_thread(google_sheets.get_user_info, user_id)
         if not user_info or not user_info.fio:
             await callback_query.message.answer("⚠️ Не удалось найти ваше ФИО в системе. Пожалуйста, обратитесь к администратору.")
             return
@@ -340,7 +366,12 @@ async def start_plandriver_callback(
             user_data=user_data,
             campaign_name=assignment_name,
             mode=None,
-            question_categories=assignment.question_categories or [],
+            question_categories=(
+                assignment.question_categories
+                or plandriver_mapper.get_question_categories(
+                    assignment.violation_type_code
+                )
+            ),
             external_test_context={
                 "source": "plandriver",
                 "violation_id": assignment.violation_id,
@@ -349,7 +380,12 @@ async def start_plandriver_callback(
                 "violation_type_code": assignment.violation_type_code,
             },
         )
-        plandriver_storage.update_violation_status(assignment.violation_id, status="sent", telegram_id=user_id)
+        await asyncio.to_thread(
+            plandriver_storage.update_violation_status,
+            assignment.violation_id,
+            status="sent",
+            telegram_id=user_id,
+        )
 
         from handlers.test import prepare_test
         await state.set_state(TestStates.PREPARE_TEST)
