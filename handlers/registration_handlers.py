@@ -49,18 +49,20 @@ async def process_fio(message: Message, state: FSMContext, google_sheets: Google
         motorcades = admin_config.motorcades
 
         if motorcades:
-            buttons = []
-            row = []
-            for mc in motorcades:
-                row.append(InlineKeyboardButton(text=mc, callback_data=f"motorcade:{mc}"))
-                if len(row) == 2:
-                    buttons.append(row)
-                    row = []
-            if row:
-                buttons.append(row)
-            
+            buttons = [
+                [
+                    InlineKeyboardButton(
+                        text=mc,
+                        callback_data=f"motorcade:{mc}",
+                    )
+                ]
+                for mc in motorcades
+            ]
             keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-            await message.answer("Отлично! Теперь выберите вашу автоколонну из списка:", reply_markup=keyboard)
+            await message.answer(
+                "Отлично! Теперь выберите вашу автоколонну из списка:",
+                reply_markup=keyboard,
+            )
         else:
             logger.warning("Список автоколонн не найден в настройках. Используется ручной ввод.")
             await message.answer("Отлично! Назовите вашу автоколонну.")
